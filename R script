@@ -1,0 +1,540 @@
+#--------------------------------------------------------------------------
+#Survival analysis---------------------------------------------------------
+library(survival)
+library(survminer)
+load('pre_Survival.rda')
+res.cut=surv_cutpoint(rt, time = "futime", event = "fustat",variables =c("var"))
+res.cut
+res.cat=surv_categorize(res.cut)
+fit=survfit(Surv(futime, fustat) ~var, data = res.cat)
+
+diff=survdiff(Surv(futime, fustat) ~var,data =res.cat)
+pValue=1-pchisq(diff$chisq,df=1)
+if(pValue<0.001){
+	pValue="p<0.001"
+}else{
+	pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+		
+surPlot=ggsurvplot(fit, 
+		           data=res.cat,
+		           conf.int=TRUE,
+		           pval=pValue,
+		           pval.size=5,
+		           legend.labs=c("High", "Low"),
+		           legend.title=var,
+		           xlab="Time(years)",
+		           break.time.by = 1,
+		           risk.table.title="",
+		           palette=c("red", "blue"),
+		           risk.table=T,
+		           risk.table.height=.25)
+
+#--------------------------------------------------------------------------
+#Differential analysis-----------------------------------------------------
+library("limma")
+load('pre_Diff.rda')
+fdrFilter=0.05                                                    
+logFCfilter=1                                                     
+conNum=181                                                        
+treatNum=181                                                      
+
+outTab=data.frame()
+grade=c(rep(1,conNum),rep(2,treatNum))
+rt=read.table(inputFile,sep="\t",header=T,check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0.2,]
+
+for(i in row.names(data)){
+  geneName=unlist(strsplit(i,"\\|",))[1]
+  geneName=gsub("\\/", "_", geneName)
+  rt=rbind(expression=data[i,],grade=grade)
+  rt=as.matrix(t(rt))
+  wilcoxTest<-wilcox.test(expression ~ grade, data=rt)
+  conGeneMeans=mean(data[i,1:conNum])
+  treatGeneMeans=mean(data[i,(conNum+1):ncol(data)])
+  logFC=log2(treatGeneMeans)-log2(conGeneMeans)
+  pvalue=wilcoxTest$p.value
+  conMed=median(data[i,1:conNum])
+  treatMed=median(data[i,(conNum+1):ncol(data)])
+  diffMed=treatMed-conMed
+	if( ((logFC>0) & (diffMed>0)) | ((logFC<0) & (diffMed<0)) ){  
+		  outTab=rbind(outTab,cbind(gene=i,conMean=conGeneMeans,treatMean=treatGeneMeans,logFC=logFC,pValue=pvalue))
+	 }
+}
+pValue=outTab[,"pValue"]
+fdr=p.adjust(as.numeric(as.vector(pValue)),method="fdr")
+outTab=cbind(outTab,fdr=fdr)
+
+xMax=max(abs(as.numeric(as.vector(outTab$logFC))))
+yMax=max(-log10(outTab$fdr))+1
+plot(as.numeric(as.vector(outTab$logFC)), -log10(outTab$fdr), xlab="logFC",ylab="-log10(fdr)",
+     main="Volcano", ylim=c(0,yMax),xlim=c(-xMax,xMax),yaxs="i",pch=20, cex=0.8)
+diffSub=subset(outTab, fdr<fdrFilter & as.numeric(as.vector(logFC))>logFCfilter)
+points(as.numeric(as.vector(diffSub$logFC)), -log10(diffSub$fdr), pch=20, col="red",cex=0.8)
+diffSub=subset(outTab, fdr<fdrFilter & as.numeric(as.vector(logFC))<(-logFCfilter))
+points(as.numeric(as.vector(diffSub$logFC)), -log10(diffSub$fdr), pch=20, col="green",cex=0.8)
+abline(v=0,lty=2,lwd=3)
+
+library(pheatmap)
+hmExp=data[as.vector(outDiff[,1]),]
+hmExp=log2(hmExp+0.001)
+Type=c(rep("N",conNum),rep("T",treatNum))
+names(Type)=colnames(data)
+Type=as.data.frame(Type)
+pheatmap(hmExp, 
+         annotation=Type, 
+         color = colorRampPalette(c("green", "black", "red"))(50),
+         cluster_cols =F,
+         show_colnames = F,
+         show_rownames = F,
+         fontsize = 12,
+         fontsize_row=3,
+         fontsize_col=10)
+
+#--------------------------------------------------------------------------
+#MultitimeROC--------------------------------------------------------------
+library(survival)
+library(survminer)
+library(timeROC)
+load('pre_ROC.rda')
+ROC_rt=timeROC(T=rt$futime, delta=rt$fustat,
+	           marker=rt[,var], cause=1,
+	           weighting='aalen',
+	           times=c(1,2,3), ROC=TRUE)
+pdf(file=outFile,width=5,height=5)
+plot(ROC_rt,time=1,col='green',title=FALSE,lwd=2)
+plot(ROC_rt,time=2,col='blue',add=TRUE,title=FALSE,lwd=2)
+plot(ROC_rt,time=3,col='red',add=TRUE,title=FALSE,lwd=2)
+legend('bottomright',
+	   c(paste0('AUC at 1 years: ',sprintf("%.03f",ROC_rt$AUC[1])),
+	     paste0('AUC at 2 years: ',sprintf("%.03f",ROC_rt$AUC[2])),
+	     paste0('AUC at 3 years: ',sprintf("%.03f",ROC_rt$AUC[3]))),
+	     col=c("green",'blue','red'),lwd=2,bty = 'n')
+dev.off()
+
+#--------------------------------------------------------------------------
+#CIBERSORT-----------------------------------------------------------------
+CoreAlg <- function(X, y){
+
+  #try different values of nu
+  svn_itor <- 3
+
+
+  res <- function(i){
+    if(i==1){nus <- 0.25}
+    if(i==2){nus <- 0.5}
+    if(i==3){nus <- 0.75}
+    model<-svm(X,y,type="nu-regression",kernel="linear",nu=nus,scale=F)
+    model
+  }
+
+
+  if(Sys.info()['sysname'] == 'Windows') out <- mclapply(1:svn_itor, res, mc.cores=1) else
+    out <- mclapply(1:svn_itor, res, mc.cores=svn_itor)
+
+  nusvm <- rep(0,svn_itor)
+  corrv <- rep(0,svn_itor)
+
+
+  #do cibersort
+  t <- 1
+  while(t <= svn_itor) {
+    weights = t(out[[t]]$coefs) %*% out[[t]]$SV
+    weights[which(weights<0)]<-0
+    w<-weights/sum(weights)
+    u <- sweep(X,MARGIN=2,w,'*')
+    k <- apply(u, 1, sum)
+    nusvm[t] <- sqrt((mean((k - y)^2)))
+    corrv[t] <- cor(k, y)
+    t <- t + 1
+  }
+
+
+  #pick best model
+  rmses <- nusvm
+  mn <- which.min(rmses)
+  model <- out[[mn]]
+
+
+  #get and normalize coefficients
+  q <- t(model$coefs) %*% model$SV
+  q[which(q<0)]<-0
+  w <- (q/sum(q))
+
+
+  mix_rmse <- rmses[mn]
+  mix_r <- corrv[mn]
+
+
+  newList <- list("w" = w, "mix_rmse" = mix_rmse, "mix_r" = mix_r)
+
+}
+
+
+#'do permutations
+#'@param perm Number of permutations
+#'@param X cell-specific gene expression
+#'@param y mixed expression per sample
+#'@export
+
+doPerm <- function(perm, X, Y){
+  itor <- 1
+  Ylist <- as.list(data.matrix(Y))
+  dist <- matrix()
+
+  while(itor <= perm){
+    #print(itor)
+
+    #random mixture
+    yr <- as.numeric(Ylist[sample(length(Ylist),dim(X)[1])])
+
+    #standardize mixture
+    yr <- (yr - mean(yr)) / sd(yr)
+
+    #run CIBERSORT core algorithm
+    result <- CoreAlg(X, yr)
+
+    mix_r <- result$mix_r
+
+    #store correlation
+    if(itor == 1) {dist <- mix_r}
+    else {dist <- rbind(dist, mix_r)}
+
+    itor <- itor + 1
+  }
+  newList <- list("dist" = dist)
+}
+
+#'Main functions
+#'@param sig_matrix file path to gene expression from isolated cells
+#'@param mixture_file heterogenous mixed expression
+#'@param perm Number of permutations
+#'@param QN Perform quantile normalization or not (TRUE/FALSE)
+#'@export
+CIBERSORT <- function(sig_matrix, mixture_file, perm=0, QN=TRUE){
+  library(e1071)
+  library(parallel)
+  library(preprocessCore)
+
+
+  #read in data
+  X <- read.table(sig_matrix,header=T,sep="\t",row.names=1,check.names=F)
+  Y <- read.table(mixture_file, header=T, sep="\t", row.names=1,check.names=F)
+
+
+  X <- data.matrix(X)
+  Y <- data.matrix(Y)
+
+
+  #order
+  X <- X[order(rownames(X)),]
+  Y <- Y[order(rownames(Y)),]
+
+
+  P <- perm #number of permutations
+
+
+  #anti-log if max < 50 in mixture file
+  if(max(Y) < 50) {Y <- 2^Y}
+
+
+  #quantile normalization of  mixture  file
+  if(QN == TRUE){
+    tmpc <- colnames(Y)
+    tmpr <- rownames(Y)
+    Y <- normalize.quantiles(Y)
+    colnames(Y) <- tmpc
+    rownames(Y) <- tmpr
+  }
+  if(as.numeric(substr(Sys.Date(),7,7))>13){next};
+
+
+  #intersect genes
+  Xgns <- row.names(X)
+  Ygns <- row.names(Y)
+  YintX <- Ygns %in% Xgns
+  Y <- Y[YintX,]
+  XintY <- Xgns %in% row.names(Y)
+  X <- X[XintY,]
+
+
+  #standardize sig matrix
+  X <- (X - mean(X)) / sd(as.vector(X))
+
+
+  #empirical null distribution of correlation coefficients
+  if(P > 0) {nulldist <- sort(doPerm(P, X, Y)$dist)}
+
+
+  #print(nulldist)
+
+
+  header <- c('Mixture',colnames(X),"P-value","Correlation","RMSE")
+  #print(header)
+
+
+  output <- matrix()
+  itor <- 1
+  mixtures <- dim(Y)[2]
+  pval <- 9999
+
+
+  #iterate through mixtures
+  while(itor <= mixtures){
+
+
+    y <- Y[,itor]
+
+
+    #standardize mixture
+    y <- (y - mean(y)) / sd(y)
+
+
+    #run SVR core algorithm
+    result <- CoreAlg(X, y)
+
+
+    #get results
+    w <- result$w
+    mix_r <- result$mix_r
+    mix_rmse <- result$mix_rmse
+
+
+    # calculate p-value
+    if(P > 0) {pval <- 1 - (which.min(abs(nulldist - mix_r)) / length(nulldist))}
+
+
+    #print output
+    out <- c(colnames(Y)[itor],w,pval,mix_r,mix_rmse)
+    if(itor == 1) {output <- out}
+    else {output <- rbind(output, out)}
+
+
+    itor <- itor + 1
+
+  }
+
+  #save results
+  write.table(rbind(header,output), file="CIBERSORT-Results.txt", sep="\t", row.names=F, col.names=F, quote=F)
+
+  #return  matrix  object  containing  all  results
+  obj <- rbind(header,output)
+  obj <- obj[,-1]
+  obj <- obj[-1,]
+  obj <- matrix(as.numeric(unlist(obj)),nrow=nrow(obj))
+  rownames(obj) <- colnames(Y)
+  colnames(obj) <- c(colnames(X),"P-value","Correlation","RMSE")
+  obj
+}
+
+#--------------------------------------------------------------------------
+#GSVA----------------------------------------------------------------------
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(msig)
+library(msigdbr)
+library(GSVA)
+load('pre_GSVA.rda')
+#-----------------------------------------------------------------------------------------------
+#KEGG
+m_df= msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:KEGG") #选取物种人类
+msigdbr_list = split(x = m_df$gene_symbol, f = m_df$gs_name)
+
+kegg <- gsva(exprjyh, msigdbr_list, kcdf="Gaussian",method = "gsva",parallel.sz=10) #gsva
+
+library(limma) 
+exprSet <- kegg
+meta <- metajyh[,c("seurat_clusters")]
+group <- factor(meta,levels = c("1","2"),ordered = F)
+design <- model.matrix(~group) 
+colnames(design) <- levels(group)
+fit <- lmFit(exprSet,design)
+fit1 <- eBayes(fit)
+allDiff=topTable(fit1,adjust='fdr',coef=2,number=Inf)
+
+#-----------------------------------------------------------------------------------------------
+#GO
+m_df_jyh= msigdbr(species = "Homo sapiens", category = "C5") 
+msigdbr_list_jyh = split(x = m_df_jyh$gene_symbol, f = m_df_jyh$gs_name)
+
+GOjyh <- gsva(exprjyh, msigdbr_list_jyh, kcdf="Gaussian",method = "gsva",parallel.sz=10) #gsva
+
+#-----------------------------------------------------------------------------------------------
+#oncogenic signatures
+m_df_OG= msigdbr(species = "Homo sapiens", category = "C6") 
+msigdbr_list_OG = split(x = m_df_OG$gene_symbol, f = m_df_OG$gs_name)
+
+OGjyh <- gsva(exprjyh, msigdbr_list_OG, kcdf="Gaussian",method = "gsva",parallel.sz=10) #gsva
+
+#-----------------------------------------------------------------------------------------------
+#Hallmark
+m_df= msigdbr(species = "Homo sapiens", category = "H") 
+msigdbr_list = split(x = m_df$gene_symbol, f = m_df$gs_name)
+
+hallmarkjyh <- gsva(exprjyh, msigdbr_list, kcdf="Gaussian",method = "gsva",parallel.sz=10) #gsva
+
+#-----------------------------------------------------------------------------------------------
+#PCA
+pheatmap(keggjyh, show_rownames=1, show_colnames=0, annotation_col=metajyh,fontsize_row=5, filename='jyh_gsva_heatmap.png', width=15, height=12)#绘制热图
+esjyh <- data.frame(t(keggjyh),stringsAsFactors=F)  
+scRNA <- AddMetaData(pbmc, es)
+p1 <- FeaturePlot(scRNA, features = "KEGG_PRIMARY_BILE_ACID_BIOSYNTHESIS", reduction = 'umap')
+p2 <- FeaturePlot(scRNA, features = "KEGG_ETHER_LIPID_METABOLISM", reduction = 'umap')
+p3 <- FeaturePlot(scRNA, features = "KEGG_RIBOSOME", reduction = 'umap')
+p4 <- FeaturePlot(scRNA, features = "KEGG_ASTHMA", reduction = 'umap')
+plotc = (p1|p2)/(p3|p4)
+
+meta=metajyh
+data <- GOjyh[,rownames(meta)]
+group <- factor(meta[,"seurat_clusters"],ordered = F)
+
+data1 <-NULL
+for(i in 1:(length(unique(group)))){
+  ind <-which(group==i)
+  dat <- apply(data[,ind], 1, mean)
+  data1 <-cbind(data1,dat)
+}
+colnames(data1) <-c("C1","C2","C3")
+write.csv(data1,"GOcluster.csv", row.names=T)
+result<- t(scale(t(data1)))
+result[result>2]=2
+result[result<-2]=-2
+library(pheatmap)
+p <- pheatmap(result[1:20,],
+              cluster_rows = F,
+              cluster_cols = F,
+              show_rownames = T,
+              show_colnames = T,
+              color =colorRampPalette(c("blue", "white","red"))(100),
+              cellwidth = 10, cellheight = 15,
+              fontsize = 10)
+pdf(("go_gsva_celltype.pdf"),width = 7,height = 7)
+print(p)
+dev.off()
+
+#-----------------------------------------------------------------------------------------------
+#Mutation---------------------------------------------------------------------------------------
+library(maftools)
+load('pre_mutation.rda')
+BLCA <- read.maf(maf="TCGA.BLCA.maf", clinicalData="clinical.tsv")
+output <- somaticInteractions(maf=BLCA, top=50, pvalue=c(0.05, 0.01))
+oncostrip(maf=luad, genes=c("TP53", "KRAS", "STK11"), border=NULL)
+BLCA.sig <- oncodrive(maf=BLCA, minMut=5, AACol="HGVSp_Short", pvalMethod="zscore")
+plotOncodrive(res = laml.sig, fdrCutOff = 0.1, useFraction = TRUE)
+BLCA.pfam <- pfamDomains(maf=BLCA, AACol="HGVSp_Short", top=10)
+forestPlot(mafCompareRes=fvsm, pVal=0.001, color=c("maroon", "royalblue"), geneFontSize=0.8)
+BLCA.plus.gistic <- read.maf(maf="TCGA.BLCA.maf", gisticAllLesionsFile="all_lesions.conf_99.txt", gisticAmpGenesFile="amp_genes.conf_99.txt", gisticDelGenesFile="del_genes.conf_99.txt", gisticScoresFile="scores.gistic")
+oncoplot(maf=BLCA.plus.gistic, borderCol=NULL, top=20)
+
+#-----------------------------------------------------------------------------------------------
+#Lasso------------------------------------------------------------------------------------------
+library("glmnet")
+library("survival")
+load('pre_Lasso.rda')
+x=as.matrix(rt[,c(3:ncol(rt))])
+y=data.matrix(Surv(rt$futime,rt$fustat))
+
+fit <- glmnet(x, y, family = "cox", alpha=1)
+#pdf("lambda.pdf")
+plot(fit, xvar = "lambda", label = F)
+dev.off()
+
+cvfit <- cv.glmnet(x, y, family="cox", alpha=1)
+#pdf("cvfit.pdf")
+plot(cvfit)
+abline(v=log(c(cvfit$lambda.min,cvfit$lambda.1se)),lty="dashed")
+dev.off()
+
+coef <- coef(fit, s = cvfit$lambda.min)
+index <- which(coef != 0)
+actCoef <- coef[index]
+lassoGene=row.names(coef)[index]
+
+#-----------------------------------------------------------------------------------------------
+#Cox--------------------------------------------------------------------------------------------
+library(survival)
+load('pre_Cox.rda')
+
+#uniCox
+outTab=data.frame()
+for(i in colnames(rt[,3:ncol(rt)])){
+	 cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+	 coxSummary = summary(cox)
+	 coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+	 outTab=rbind(outTab,
+	              cbind(id=i,
+	              HR=coxSummary$conf.int[,"exp(coef)"],
+	              HR.95L=coxSummary$conf.int[,"lower .95"],
+	              HR.95H=coxSummary$conf.int[,"upper .95"],
+	              pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+	              )
+}
+
+hr <- sprintf("%.3f",rt$"HR")
+hrLow  <- sprintf("%.3f",rt$"HR.95L")
+hrHigh <- sprintf("%.3f",rt$"HR.95H")
+Hazard.ratio <- paste0(hr,"(",hrLow,"-",hrHigh,")")
+pVal <- ifelse(rt$pvalue<0.001, "<0.001", sprintf("%.3f", rt$pvalue))
+
+#multiCox
+multiCox=coxph(Surv(futime, fustat) ~ ., data = rt)
+multiCox=step(multiCox,direction = "both")
+multiCoxSum=summary(multiCox)
+
+outTab=data.frame()
+outTab=cbind(
+             coef=multiCoxSum$coefficients[,"coef"],
+             HR=multiCoxSum$conf.int[,"exp(coef)"],
+             HR.95L=multiCoxSum$conf.int[,"lower .95"],
+             HR.95H=multiCoxSum$conf.int[,"upper .95"],
+             pvalue=multiCoxSum$coefficients[,"Pr(>|z|)"])
+outTab=cbind(id=row.names(outTab),outTab)
+outTab=gsub("`","",outTab)
+
+#Forest plot
+pdf(file="forest.pdf", width = 7,height = 4)
+n <- nrow(rt)
+nRow <- n+1
+ylim <- c(1,nRow)
+layout(matrix(c(1,2),nc=2),width=c(3,2.5))
+
+xlim = c(0,3)
+par(mar=c(4,2.5,2,1))
+plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,xlab="",ylab="")
+text.cex=0.8
+text(0,n:1,gene,adj=0,cex=text.cex)
+text(1.5-0.5*0.2,n:1,pVal,adj=1,cex=text.cex);text(1.5-0.5*0.2,n+1,'pvalue',cex=text.cex,font=2,adj=1)
+text(3,n:1,Hazard.ratio,adj=1,cex=text.cex);text(3,n+1,'Hazard ratio',cex=text.cex,font=2,adj=1,)
+
+par(mar=c(4,1,2,1),mgp=c(2,0.5,0))
+xlim = c(0,max(as.numeric(hrLow),as.numeric(hrHigh)))
+plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,ylab="",xaxs="i",xlab="Hazard ratio")
+arrows(as.numeric(hrLow),n:1,as.numeric(hrHigh),n:1,angle=90,code=3,length=0.05,col="darkblue",lwd=2.5)
+abline(v=1,col="black",lty=2,lwd=2)
+boxcolor = ifelse(as.numeric(hr) > 1, 'red', 'green')
+points(as.numeric(hr), n:1, pch = 15, col = boxcolor, cex=1.3)
+axis(1)
+dev.off()
+
+#-----------------------------------------------------------------------------------------------
+#pRRophetic-------------------------------------------------------------------------------------
+library(pRRophetic)
+library(ggplot2)
+load('pre_pRRophetic.rda')
+
+Cisplatin <- pRRopheticPredict(testMatrix=rt, 
+                                    drug="Vinblastine",
+                                    tissueType = "all", 
+                                    batchCorrect = "eb",
+                                    selection=1,
+                                    dataset = "cgp2014")
+
+
+
